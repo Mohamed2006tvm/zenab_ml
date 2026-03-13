@@ -11,11 +11,15 @@ app = Flask(__name__)
 CORS(app)
 
 # ─── Load YOLO model ──────────────────────────────────────────────────────────
-MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(os.path.dirname(__file__), "Best.pt"))
+MODEL_PATH = os.environ.get("MODEL_PATH", "Best.pt")
 model = None
 
 def load_model():
     global model
+    if not os.path.exists(MODEL_PATH):
+        print(f"⚠️  Model file not found at: {MODEL_PATH}. Simulation mode active.")
+        return
+
     try:
         from ultralytics import YOLO
         model = YOLO(MODEL_PATH)
@@ -52,13 +56,6 @@ def aqi_status(aqi):
 
 # ─── Inference ────────────────────────────────────────────────────────────────
 def run_inference(image_bytes):
-    """
-    Run YOLO inference on the image.
-    The model is expected to output bounding boxes where:
-      - class 0 = PM2.5 particle region
-      - class 1 = PM10 particle region
-    Confidence scores are mapped to concentration estimates.
-    """
     if model is None:
         raise RuntimeError("Model not loaded")
 
@@ -74,19 +71,14 @@ def run_inference(image_bytes):
         for box in result.boxes:
             cls   = int(box.cls[0])
             conf  = float(box.conf[0])
-            # Map confidence → concentration estimate
-            # Assumes model confidence correlates with particle density
             if cls == 0:  # PM2.5
                 pm25_detections.append(conf)
             elif cls == 1:  # PM10
                 pm10_detections.append(conf)
 
-    # Convert confidence to µg/m³ concentrations
-    # Scale: confidence 0-1 → PM2.5 0-300 µg/m³, PM10 0-600 µg/m³
     pm25 = round(float(np.mean(pm25_detections)) * 300, 1) if pm25_detections else 0.0
     pm10 = round(float(np.mean(pm10_detections)) * 600, 1) if pm10_detections else 0.0
 
-    # Use detected count as confidence proxy
     confidence = round(
         float(np.mean(pm25_detections + pm10_detections)) if (pm25_detections or pm10_detections) else 0.0,
         3
@@ -110,16 +102,15 @@ def run_inference(image_bytes):
 def health():
     return jsonify({
         "service": "Zenab ML Service",
-        "status": "running",
-        "model_loaded": model is not None,
+        "status": "online",
+        "mode": "Real AI" if model else "Simulation",
+        "model_found": os.path.exists(MODEL_PATH),
         "model_path": MODEL_PATH,
+        "port": os.environ.get("PORT", "8000 (default)")
     })
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    """
-    Accept an image upload, run YOLO inference, return PM2.5/PM10/AQI.
-    """
     if "image" not in request.files:
         return jsonify({"error": "No image file provided. Use field name 'image'."}), 400
 
@@ -135,11 +126,13 @@ def analyze():
     image_bytes = file.read()
 
     if model is None:
-        # Return simulated data if model not loaded (for dev/testing)
         import random
+        # Ensure repeatable results for same image size during simulation
+        random.seed(len(image_bytes))
         pm25 = round(random.uniform(15, 280), 1)
         pm10 = round(pm25 * random.uniform(1.4, 2.1), 1)
         aqi  = pm25_to_aqi(pm25)
+        random.seed() # reset
         return jsonify({
             "pm25": pm25,
             "pm10": pm10,
@@ -148,7 +141,7 @@ def analyze():
             "confidence": round(random.uniform(0.6, 0.95), 3),
             "detections": random.randint(1, 8),
             "simulated": True,
-            "note": "Model not loaded — returning simulated data",
+            "note": "Running in Simulation Mode (Best.pt not found)",
         })
 
     try:
@@ -159,6 +152,6 @@ def analyze():
 
 if __name__ == "__main__":
     load_model()
+    # Let Render define the port
     port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 ML Service running on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
